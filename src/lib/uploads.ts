@@ -1,4 +1,5 @@
 import { createHash, randomUUID, timingSafeEqual } from "crypto";
+import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { getEnv } from "@/lib/env";
 import { extensionError, fileExtension, isAllowedExtension, MIME_BY_EXTENSION, sanitizeFileName } from "@/lib/file-types";
@@ -10,6 +11,9 @@ import { UploadError } from "@/lib/upload-error";
 import { uploadInitSchema } from "@/lib/validation";
 
 const SESSION_TTL_MS = 30 * 60 * 1000;
+const CONTENT_LOCK = { maxWait: 15_000, timeout: 90_000 };
+
+type Tx = Prisma.TransactionClient;
 
 type ReservedSession = {
   id: string;
@@ -234,66 +238,122 @@ async function loadReserved(userId: string, sessionId: string): Promise<Reserved
   return session;
 }
 
-async function releaseReservation(
+type SessionOutcome =
+  | { ok: true }
+  | { ok: false; error: UploadError; removeKey?: string };
+
+type PublishOutcome =
+  | { ok: true; already: boolean; documentId: string; slug: string }
+  | { ok: false; error: UploadError; removeKey?: string };
+
+async function lockSession(tx: Tx, sessionId: string, userId: string): Promise<ReservedSession | null> {
+  const rows = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "UploadSession"
+    WHERE "id" = ${sessionId} AND "userId" = ${userId}
+    FOR UPDATE
+  `;
+  if (rows.length === 0) return null;
+  return tx.uploadSession.findUnique({
+    where: { id: sessionId },
+    include: {
+      document: {
+        select: {
+          id: true,
+          objectKey: true,
+          extension: true,
+          mimeType: true,
+          sha256: true,
+          slug: true,
+          status: true,
+          originalFileName: true,
+        },
+      },
+    },
+  });
+}
+
+async function releaseLocked(
+  tx: Tx,
   session: ReservedSession,
   status: "REJECTED" | "QUARANTINED",
   message: string,
-  keepFile: boolean,
-): Promise<void> {
-  const updated = await db.$transaction(async (tx) => {
-    const result = await tx.uploadSession.updateMany({
-      where: { id: session.id, status: "RESERVED" },
-      data: { status: "RELEASED" },
-    });
-    if (result.count !== 1 || !session.documentId) return result.count;
-    await tx.document.update({
-      where: { id: session.documentId },
-      data: {
-        status,
-        scanStatus: status === "QUARANTINED" ? "quarantine" : "rejected",
-        scanMessage: message,
-      },
-    });
-    return result.count;
+): Promise<boolean> {
+  const updated = await tx.uploadSession.updateMany({
+    where: { id: session.id, status: "RESERVED" },
+    data: { status: "RELEASED" },
   });
-  if (updated === 1 && !keepFile && session.document) {
-    await getStorage().remove(session.document.objectKey);
-  }
+  if (updated.count !== 1) return false;
+  if (!session.documentId) return true;
+  await tx.document.update({
+    where: { id: session.documentId },
+    data: {
+      status,
+      scanStatus: status === "QUARANTINED" ? "quarantine" : "rejected",
+      scanMessage: message,
+    },
+  });
+  return true;
+}
+
+async function releaseReservation(session: ReservedSession, message: string): Promise<void> {
+  const released = await db.$transaction(async (tx) => releaseLocked(tx, session, "REJECTED", message));
+  if (released && session.document) await getStorage().remove(session.document.objectKey);
+}
+
+function failed(
+  session: ReservedSession,
+  code: string,
+  message: string,
+  status: number,
+): { ok: false; error: UploadError; removeKey?: string } {
+  return {
+    ok: false,
+    error: new UploadError(code, message, status),
+    removeKey: session.document?.objectKey,
+  };
 }
 
 export async function saveUploadContent(userId: string, sessionId: string, data: Buffer): Promise<{ sizeBytes: number }> {
   const session = await loadReserved(userId, sessionId);
-  if (session.expiresAt.getTime() <= Date.now() && session.status !== "COMPLETED") {
-    if (session.status === "RESERVED") {
-      await releaseReservation(session, "REJECTED", "Sesi unggah kedaluwarsa.", false);
-    }
-    throw new UploadError("EXPIRED", "Sesi unggah kedaluwarsa. Kuota dikembalikan. Mulai unggah dari awal.", 410);
-  }
-  if (session.status === "COMPLETED") {
-    throw new UploadError("CONFLICT", "Unggahan ini sudah selesai.", 409);
-  }
-  if (session.status !== "RESERVED" || !session.document) {
-    throw new UploadError("CONFLICT", "Sesi unggah tidak lagi menahan kuota.", 409);
-  }
-  if (BigInt(data.length) !== session.expectedSizeBytes) {
-    await releaseReservation(
-      session,
-      "REJECTED",
-      "Ukuran berkas tidak sama dengan yang dicadangkan.",
-      false,
-    );
-    throw new UploadError(
-      "REJECTED",
-      "Ukuran berkas tidak sama dengan yang dicadangkan. Kuota dikembalikan.",
-      422,
-    );
-  }
-
+  let outcome: SessionOutcome;
   try {
-    await getStorage().put(session.document.objectKey, data, session.document.mimeType);
-  } catch {
-    await releaseReservation(session, "REJECTED", "Gagal menyimpan berkas.", false);
+    outcome = await db.$transaction(async (tx) => {
+      const current = await lockSession(tx, session.id, userId);
+      if (!current) return { ok: false, error: new UploadError("NOT_FOUND", "Sesi unggah tidak ditemukan.", 404) };
+      if (current.status === "COMPLETED") {
+        return { ok: false, error: new UploadError("CONFLICT", "Unggahan ini sudah selesai.", 409) };
+      }
+      if (current.expiresAt.getTime() <= Date.now() && current.status === "RESERVED") {
+        const released = await releaseLocked(tx, current, "REJECTED", "Sesi unggah kedaluwarsa.");
+        if (!released) return { ok: false, error: new UploadError("CONFLICT", "Sesi unggah tidak lagi menahan kuota.", 409) };
+        return failed(current, "EXPIRED", "Sesi unggah kedaluwarsa. Kuota dikembalikan. Mulai unggah dari awal.", 410);
+      }
+      if (current.status !== "RESERVED" || !current.document) {
+        return { ok: false, error: new UploadError("CONFLICT", "Sesi unggah tidak lagi menahan kuota.", 409) };
+      }
+      if (BigInt(data.length) !== current.expectedSizeBytes) {
+        const released = await releaseLocked(tx, current, "REJECTED", "Ukuran berkas tidak sama dengan yang dicadangkan.");
+        if (!released) return { ok: false, error: new UploadError("CONFLICT", "Sesi unggah tidak lagi menahan kuota.", 409) };
+        return failed(
+          current,
+          "REJECTED",
+          "Ukuran berkas tidak sama dengan yang dicadangkan. Kuota dikembalikan.",
+          422,
+        );
+      }
+      // Status check and object write share the session lock, so a later request
+      // cannot replace bytes after complete has inspected them.
+      await getStorage().put(current.document.objectKey, data, current.document.mimeType);
+      return { ok: true };
+    }, CONTENT_LOCK);
+  } catch (error) {
+    if (error instanceof UploadError) throw error;
+    await releaseReservation(session, "Gagal menyimpan berkas.").catch(() => undefined);
     throw new UploadError("REJECTED", "Gagal menyimpan berkas. Kuota dikembalikan.", 500);
+  }
+  if (!outcome.ok) {
+    if (outcome.removeKey) await getStorage().remove(outcome.removeKey);
+    throw outcome.error;
   }
   return { sizeBytes: data.length };
 }
@@ -308,114 +368,144 @@ export async function completeUpload(userId: string, sessionId: string, claimedS
       message: "Dokumen sudah diterbitkan.",
     };
   }
-  if (session.expiresAt.getTime() <= Date.now() && session.status !== "COMPLETED") {
-    if (session.status === "RESERVED") {
-      await releaseReservation(session, "REJECTED", "Sesi unggah kedaluwarsa.", false);
+
+  const outcome = await db.$transaction(async (tx): Promise<PublishOutcome> => {
+    const current = await lockSession(tx, session.id, userId);
+    if (!current) return { ok: false, error: new UploadError("NOT_FOUND", "Sesi unggah tidak ditemukan.", 404) };
+    if (current.status === "COMPLETED" && current.document?.status === "PUBLISHED") {
+      return { ok: true, already: true, documentId: current.document.id, slug: current.document.slug };
     }
-    throw new UploadError("EXPIRED", "Sesi unggah kedaluwarsa. Kuota dikembalikan. Mulai unggah dari awal.", 410);
-  }
-  if (session.status !== "RESERVED" || !session.document) {
-    throw new UploadError("CONFLICT", "Sesi unggah tidak bisa diselesaikan.", 409);
-  }
-  if (!isAllowedExtension(session.document.extension)) {
-    await releaseReservation(session, "REJECTED", "Ekstensi tidak diizinkan.", false);
-    throw new UploadError("REJECTED", "Ekstensi tidak diizinkan. Kuota dikembalikan.", 422);
-  }
+    if (current.expiresAt.getTime() <= Date.now() && current.status === "RESERVED") {
+      const released = await releaseLocked(tx, current, "REJECTED", "Sesi unggah kedaluwarsa.");
+      if (!released) return { ok: false, error: new UploadError("CONFLICT", "Sesi unggah tidak bisa diselesaikan.", 409) };
+      return {
+        ...failed(current, "EXPIRED", "Sesi unggah kedaluwarsa. Kuota dikembalikan. Mulai unggah dari awal.", 410),
+      };
+    }
+    if (current.status !== "RESERVED" || !current.document) {
+      return { ok: false, error: new UploadError("CONFLICT", "Sesi unggah tidak bisa diselesaikan.", 409) };
+    }
+    if (!isAllowedExtension(current.document.extension)) {
+      const released = await releaseLocked(tx, current, "REJECTED", "Ekstensi tidak diizinkan.");
+      if (!released) return { ok: false, error: new UploadError("CONFLICT", "Sesi unggah tidak bisa diselesaikan.", 409) };
+      return failed(current, "REJECTED", "Ekstensi tidak diizinkan. Kuota dikembalikan.", 422);
+    }
 
-  const extension = session.document.extension;
-  let data: Buffer;
-  try {
-    data = await getStorage().get(session.document.objectKey);
-  } catch {
-    await releaseReservation(session, "REJECTED", "Berkas belum terunggah.", false);
-    throw new UploadError("REJECTED", "Berkas belum terunggah. Kuota dikembalikan.", 422);
-  }
+    let data: Buffer;
+    try {
+      data = await getStorage().get(current.document.objectKey);
+    } catch {
+      const released = await releaseLocked(tx, current, "REJECTED", "Berkas belum terunggah.");
+      if (!released) return { ok: false, error: new UploadError("CONFLICT", "Sesi unggah tidak bisa diselesaikan.", 409) };
+      return failed(current, "REJECTED", "Berkas belum terunggah. Kuota dikembalikan.", 422);
+    }
 
-  if (BigInt(data.length) !== session.expectedSizeBytes) {
-    await releaseReservation(session, "REJECTED", "Ukuran berkas tidak sesuai.", false);
-    throw new UploadError("REJECTED", "Ukuran berkas tidak sesuai reservasi. Kuota dikembalikan.", 422);
-  }
+    if (BigInt(data.length) !== current.expectedSizeBytes) {
+      const released = await releaseLocked(tx, current, "REJECTED", "Ukuran berkas tidak sesuai.");
+      if (!released) return { ok: false, error: new UploadError("CONFLICT", "Sesi unggah tidak bisa diselesaikan.", 409) };
+      return failed(current, "REJECTED", "Ukuran berkas tidak sesuai reservasi. Kuota dikembalikan.", 422);
+    }
 
-  const actualSha = sha256Hex(data);
-  const expectedSha = session.document.sha256.toLowerCase();
-  if (!sameHex(actualSha, expectedSha) || (claimedSha256 && !sameHex(actualSha, claimedSha256.toLowerCase()))) {
-    await releaseReservation(session, "REJECTED", "Checksum berkas tidak cocok.", false);
-    throw new UploadError("REJECTED", "Checksum berkas tidak cocok. Kuota dikembalikan.", 422);
-  }
+    const actualSha = sha256Hex(data);
+    const expectedSha = current.document.sha256.toLowerCase();
+    if (!sameHex(actualSha, expectedSha) || (claimedSha256 && !sameHex(actualSha, claimedSha256.toLowerCase()))) {
+      const released = await releaseLocked(tx, current, "REJECTED", "Checksum berkas tidak cocok.");
+      if (!released) return { ok: false, error: new UploadError("CONFLICT", "Sesi unggah tidak bisa diselesaikan.", 409) };
+      return failed(current, "REJECTED", "Checksum berkas tidak cocok. Kuota dikembalikan.", 422);
+    }
 
-  let verdict: ReturnType<typeof inspectUpload>;
-  try {
-    verdict = inspectUpload(data, extension);
-  } catch {
-    await releaseReservation(session, "REJECTED", "Berkas rusak dan tidak bisa diperiksa.", false);
-    throw new UploadError("REJECTED", "Berkas rusak dan tidak bisa diperiksa. Kuota dikembalikan.", 422);
-  }
+    let verdict: ReturnType<typeof inspectUpload>;
+    try {
+      verdict = inspectUpload(data, current.document.extension);
+    } catch {
+      const released = await releaseLocked(tx, current, "REJECTED", "Berkas rusak dan tidak bisa diperiksa.");
+      if (!released) return { ok: false, error: new UploadError("CONFLICT", "Sesi unggah tidak bisa diselesaikan.", 409) };
+      return failed(current, "REJECTED", "Berkas rusak dan tidak bisa diperiksa. Kuota dikembalikan.", 422);
+    }
 
-  if (!verdict.ok) {
-    const keepFile = verdict.status === "QUARANTINED";
-    await releaseReservation(session, verdict.status, verdict.message, keepFile);
-    throw new UploadError(verdict.status, `${verdict.message} Kuota dikembalikan.`, 422);
-  }
-
-  let published: { already: boolean };
-  try {
-    published = await db.$transaction(async (tx) => {
-      const locked = await tx.$queryRaw<Array<{ storageUsedBytes: bigint; storageQuotaBytes: bigint }>>`
-        SELECT "storageUsedBytes", "storageQuotaBytes"
-        FROM "User"
-        WHERE "id" = ${userId}
-        FOR UPDATE
+    if (!verdict.ok && verdict.status === "QUARANTINED") {
+      const user = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "User" WHERE "id" = ${userId} FOR UPDATE
       `;
-      const row = locked[0];
-      if (!row) throw new UploadError("NOT_FOUND", "Pengguna tidak ditemukan.", 404);
-      const reserved = await tx.uploadSession.aggregate({
-        where: { userId, status: "RESERVED", expiresAt: { gt: new Date() } },
-        _sum: { reservedBytes: true },
-      });
-      const held = BigInt(row.storageUsedBytes) + (reserved._sum.reservedBytes ?? BigInt(0));
-      if (held > BigInt(row.storageQuotaBytes)) {
-        throw new UploadError("QUOTA", "Kuota tidak lagi cukup untuk menyelesaikan unggahan ini.", 409);
-      }
-
-      const marked = await tx.uploadSession.updateMany({
-        where: { id: session.id, status: "RESERVED" },
-        data: { status: "COMPLETED" },
-      });
-      if (marked.count !== 1) {
-        const current = await tx.uploadSession.findUnique({ where: { id: session.id } });
-        if (current?.status === "COMPLETED") return { already: true };
-        throw new UploadError("CONFLICT", "Sesi unggah tidak bisa diselesaikan.", 409);
-      }
-      await tx.document.update({
-        where: { id: session.document!.id },
-        data: {
-          status: "PUBLISHED",
-          publishedAt: new Date(),
-          scanStatus: "clean",
-          scanMessage: "Lolos pemeriksaan jenis berkas dan struktur.",
-          sizeBytes: BigInt(data.length),
-          sha256: actualSha,
-        },
-      });
+      if (user.length === 0) return { ok: false, error: new UploadError("NOT_FOUND", "Pengguna tidak ditemukan.", 404) };
+      const released = await releaseLocked(tx, current, "QUARANTINED", verdict.message);
+      if (!released) return { ok: false, error: new UploadError("CONFLICT", "Sesi unggah tidak bisa diselesaikan.", 409) };
       await tx.user.update({
         where: { id: userId },
         data: { storageUsedBytes: { increment: BigInt(data.length) } },
       });
-      return { already: false };
-    });
-  } catch (error) {
-    if (error instanceof UploadError && error.code === "QUOTA") {
-      await releaseReservation(session, "REJECTED", "Kuota tidak lagi cukup.", false);
+      return {
+        ok: false,
+        error: new UploadError(
+          "QUARANTINED",
+          `${verdict.message} Berkas tetap disimpan dan dihitung ke kuota.`,
+          422,
+        ),
+      };
     }
-    throw error;
-  }
 
+    if (!verdict.ok) {
+      const released = await releaseLocked(tx, current, "REJECTED", verdict.message);
+      if (!released) return { ok: false, error: new UploadError("CONFLICT", "Sesi unggah tidak bisa diselesaikan.", 409) };
+      return failed(current, verdict.status, `${verdict.message} Kuota dikembalikan.`, 422);
+    }
+
+    const locked = await tx.$queryRaw<Array<{ storageUsedBytes: bigint; storageQuotaBytes: bigint }>>`
+      SELECT "storageUsedBytes", "storageQuotaBytes"
+      FROM "User"
+      WHERE "id" = ${userId}
+      FOR UPDATE
+    `;
+    const row = locked[0];
+    if (!row) return { ok: false, error: new UploadError("NOT_FOUND", "Pengguna tidak ditemukan.", 404) };
+    const reserved = await tx.uploadSession.aggregate({
+      where: { userId, status: "RESERVED", expiresAt: { gt: new Date() } },
+      _sum: { reservedBytes: true },
+    });
+    const held = BigInt(row.storageUsedBytes) + (reserved._sum.reservedBytes ?? BigInt(0));
+    if (held > BigInt(row.storageQuotaBytes)) {
+      const released = await releaseLocked(tx, current, "REJECTED", "Kuota tidak lagi cukup.");
+      if (!released) return { ok: false, error: new UploadError("CONFLICT", "Sesi unggah tidak bisa diselesaikan.", 409) };
+      return {
+        ok: false,
+        error: new UploadError("QUOTA", "Kuota tidak lagi cukup untuk menyelesaikan unggahan ini.", 409),
+        removeKey: current.document.objectKey,
+      };
+    }
+
+    const marked = await tx.uploadSession.updateMany({
+      where: { id: current.id, status: "RESERVED" },
+      data: { status: "COMPLETED" },
+    });
+    if (marked.count !== 1) {
+      return { ok: false, error: new UploadError("CONFLICT", "Sesi unggah tidak bisa diselesaikan.", 409) };
+    }
+    await tx.document.update({
+      where: { id: current.document.id },
+      data: {
+        status: "PUBLISHED",
+        publishedAt: new Date(),
+        scanStatus: "clean",
+        scanMessage: "Lolos pemeriksaan jenis berkas dan struktur.",
+        sizeBytes: BigInt(data.length),
+        sha256: actualSha,
+      },
+    });
+    await tx.user.update({
+      where: { id: userId },
+      data: { storageUsedBytes: { increment: BigInt(data.length) } },
+    });
+    return { ok: true, already: false, documentId: current.document.id, slug: current.document.slug };
+  }, CONTENT_LOCK);
+
+  if (!outcome.ok) {
+    if (outcome.removeKey) await getStorage().remove(outcome.removeKey);
+    throw outcome.error;
+  }
   return {
     status: "PUBLISHED" as const,
-    documentId: session.document.id,
-    slug: session.document.slug,
-    message: published.already
-      ? "Dokumen sudah diterbitkan."
-      : "Dokumen lolos pemeriksaan dan sudah diterbitkan.",
+    documentId: outcome.documentId,
+    slug: outcome.slug,
+    message: outcome.already ? "Dokumen sudah diterbitkan." : "Dokumen lolos pemeriksaan dan sudah diterbitkan.",
   };
 }

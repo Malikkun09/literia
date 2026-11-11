@@ -1,4 +1,4 @@
-import { randomUUID } from "crypto";
+import { createHash, randomUUID, timingSafeEqual } from "crypto";
 import { mkdir, writeFile, readFile, unlink, stat, rename } from "fs/promises";
 import { join } from "path";
 import { createReadStream } from "fs";
@@ -68,4 +68,20 @@ export function generateObjectKey(extension: string): string {
 
 export function getStorage(): StorageAdapter {
   return new LocalStorageAdapter();
+}
+
+export async function readVerifiedObject(
+  objectKey: string,
+  sha256: string,
+): Promise<Buffer | "missing" | "mismatch"> {
+  let data: Buffer;
+  try {
+    data = await getStorage().get(objectKey);
+  } catch {
+    return "missing";
+  }
+  const actual = createHash("sha256").update(data).digest("hex");
+  const expected = sha256.toLowerCase();
+  if (actual.length !== expected.length) return "mismatch";
+  return timingSafeEqual(Buffer.from(actual), Buffer.from(expected)) ? data : "mismatch";
 }

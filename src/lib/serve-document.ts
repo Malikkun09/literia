@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { resolveActor } from "@/lib/actor";
+import { writeAudit } from "@/lib/audit";
 import { db } from "@/lib/db";
 import { contentDisposition, sanitizeFileName } from "@/lib/file-types";
-import { getStorage } from "@/lib/storage";
+import { readVerifiedObject } from "@/lib/storage";
 
 export async function servePublishedDocument(id: string, disposition: "inline" | "attachment") {
   const actor = await resolveActor();
@@ -15,16 +16,23 @@ export async function servePublishedDocument(id: string, disposition: "inline" |
 
   const document = await db.document.findFirst({
     where: { id, status: "PUBLISHED" },
-    select: { objectKey: true, mimeType: true, originalFileName: true },
+    select: { objectKey: true, mimeType: true, originalFileName: true, sha256: true },
   });
   if (!document) {
     return NextResponse.json({ error: "Dokumen tidak ditemukan." }, { status: 404 });
   }
 
-  let data: Buffer;
-  try {
-    data = await getStorage().get(document.objectKey);
-  } catch {
+  const data = await readVerifiedObject(document.objectKey, document.sha256);
+  if (data === "mismatch") {
+    await writeAudit({
+      actorId: actor.user.id,
+      action: "document.bytes_mismatch",
+      targetType: "Document",
+      targetId: id,
+    });
+    return NextResponse.json({ error: "Berkas gagal pemeriksaan integritas." }, { status: 404 });
+  }
+  if (data === "missing") {
     return NextResponse.json({ error: "Berkas tidak tersedia di penyimpanan." }, { status: 404 });
   }
 

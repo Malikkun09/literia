@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { after, describe, it } from "node:test";
 import { db } from "../src/lib/db";
-import { getStorage } from "../src/lib/storage";
+import { getStorage, readVerifiedObject } from "../src/lib/storage";
 import { UploadError } from "../src/lib/upload-error";
 import { completeUpload, getQuotaSnapshot, initUpload, saveUploadContent } from "../src/lib/uploads";
 import { officePackage } from "./zip-fixture";
@@ -182,9 +182,9 @@ describe("kuota atomik", () => {
     }
   });
 
-  it("karantina tidak memotong kuota", async () => {
+  it("karantina tetap dihitung ke kuota", async () => {
     const active = Buffer.from("%PDF-1.4\n1 0 obj<</JavaScript (alert)>>endobj\n%%EOF\n");
-    const user = await makeUser(BigInt(active.length));
+    const user = await makeUser(BigInt(active.length * 2));
     const opened = await initUpload(user.id, {
       title: "PDF aktif",
       fileName: "aktif.pdf",
@@ -195,17 +195,89 @@ describe("kuota atomik", () => {
     await assert.rejects(() => completeUpload(user.id, opened.id), (error: unknown) => {
       assert.ok(error instanceof UploadError);
       assert.equal(error.code, "QUARANTINED");
+      assert.match(error.message, /dihitung ke kuota/);
+      assert.doesNotMatch(error.message, /dikembalikan/);
       return true;
     });
     const document = await db.document.findUniqueOrThrow({ where: { id: opened.documentId } });
     assert.equal(document.status, "QUARANTINED");
     assert.equal(await getStorage().exists(document.objectKey), true);
     const quota = await getQuotaSnapshot(user.id);
-    assert.equal(quota.usedBytes, BigInt(0));
+    assert.equal(quota.usedBytes, BigInt(active.length));
     assert.equal(quota.reservedBytes, BigInt(0));
 
     const note = Buffer.from("x".repeat(active.length));
     const published = await publish(user.id, "catatan.txt", note, "Setelah karantina");
     assert.equal(published.done.status, "PUBLISHED");
+    const full = await getQuotaSnapshot(user.id);
+    assert.equal(full.usedBytes, BigInt(active.length * 2));
+    assert.equal(full.reservedBytes, BigInt(0));
+    await assert.rejects(
+      () =>
+        initUpload(user.id, {
+          title: "Melebihi sisa",
+          fileName: "lagi.txt",
+          sizeBytes: 1,
+          sha256: sha(Buffer.from("x")),
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof UploadError);
+        assert.equal(error.code, "QUOTA");
+        return true;
+      },
+    );
+  });
+
+  it("penulisan setelah terbit tidak menimpa berkas yang sudah diperiksa", async () => {
+    const user = await makeUser(BigInt(10000));
+    const good = Buffer.from("teks asli yang sudah diperiksa\n");
+    const published = await publish(user.id, "catatan.txt", good, "Sudah diperiksa");
+    const document = await db.document.findUniqueOrThrow({ where: { id: published.opened.documentId } });
+    const sameLength = Buffer.from("Y".repeat(good.length));
+    await assert.rejects(() => saveUploadContent(user.id, published.opened.id, sameLength), (error: unknown) => {
+      assert.ok(error instanceof UploadError);
+      assert.equal(error.code, "CONFLICT");
+      return true;
+    });
+    await assert.rejects(() => saveUploadContent(user.id, published.opened.id, Buffer.from("pendek")), (error: unknown) => {
+      assert.ok(error instanceof UploadError);
+      assert.equal(error.code, "CONFLICT");
+      return true;
+    });
+    const stored = await getStorage().get(document.objectKey);
+    assert.equal(sha(stored), sha(good));
+    assert.ok(Buffer.isBuffer(await readVerifiedObject(document.objectKey, document.sha256)));
+    await getStorage().put(document.objectKey, sameLength, document.mimeType);
+    assert.equal(await readVerifiedObject(document.objectKey, document.sha256), "mismatch");
+  });
+
+  it("dua penulisan bersamaan tidak menerbitkan byte yang tidak diperiksa", async () => {
+    const user = await makeUser(BigInt(100000));
+    const good = Buffer.from("teks yang lolos pemeriksaan kuota\n");
+    const bad = Buffer.from("Z".repeat(good.length));
+    for (let round = 0; round < 8; round += 1) {
+      const opened = await initUpload(user.id, {
+        title: `Balapan isi ${round}`,
+        fileName: "catatan.txt",
+        sizeBytes: good.length,
+        sha256: sha(good),
+      });
+      await saveUploadContent(user.id, opened.id, good);
+      await Promise.allSettled([
+        saveUploadContent(user.id, opened.id, bad),
+        completeUpload(user.id, opened.id, sha(good)),
+      ]);
+      const document = await db.document.findUniqueOrThrow({ where: { id: opened.documentId } });
+      if (document.status === "PUBLISHED") {
+        const stored = await getStorage().get(document.objectKey);
+        assert.equal(sha(stored), sha(good));
+        assert.equal(document.sha256, sha(good));
+        continue;
+      }
+      assert.equal(document.status, "REJECTED");
+      assert.equal(await getStorage().exists(document.objectKey), false);
+      const quota = await getQuotaSnapshot(user.id);
+      assert.equal(quota.reservedBytes, BigInt(0));
+    }
   });
 });

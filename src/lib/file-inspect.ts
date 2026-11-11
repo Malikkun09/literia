@@ -1,4 +1,5 @@
 import { crc32, inflateRawSync } from "zlib";
+import { inspectPdfBytes } from "@/lib/pdf-inspect";
 import type { AllowedExtension } from "@/lib/validation";
 
 export type FileVerdict =
@@ -333,27 +334,6 @@ function inspectOoxml(buffer: Buffer, extension: "docx" | "pptx" | "xlsx"): File
   return { ok: true };
 }
 
-function inspectPdf(buffer: Buffer): FileVerdict {
-  const latin = buffer.toString("latin1");
-  const tail = latin.slice(Math.max(0, latin.length - 2048));
-  if (!tail.includes("%%EOF")) return rejected("PDF rusak: penanda akhir tidak ditemukan.");
-  if (latin.includes("/Encrypt")) return rejected("PDF terenkripsi ditolak karena isinya tidak bisa diperiksa.");
-  if (
-    /\/JavaScript\b/.test(latin) ||
-    /\/JS[\s(/<]/.test(latin) ||
-    /\/Launch\b/.test(latin) ||
-    /\/EmbeddedFile\b/.test(latin) ||
-    /\/RichMedia\b/.test(latin)
-  ) {
-    return {
-      ok: false,
-      status: "QUARANTINED",
-      message: "PDF berisi skrip atau lampiran aktif dan dikarantina.",
-    };
-  }
-  return { ok: true };
-}
-
 function inspectText(buffer: Buffer): FileVerdict {
   if (buffer.includes(0)) return rejected("File teks berisi data biner dan ditolak.");
   for (const byte of buffer) {
@@ -391,7 +371,7 @@ export function inspectUpload(buffer: Buffer, extension: AllowedExtension): File
 
   if (extension === "pdf") {
     if (kind !== "pdf") return rejected(forbiddenKindMessage(kind) ?? "Isi file tidak sesuai ekstensi PDF.");
-    return inspectPdf(buffer);
+    return inspectPdfBytes(buffer);
   }
 
   if (extension === "docx" || extension === "pptx" || extension === "xlsx") {

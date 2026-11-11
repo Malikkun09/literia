@@ -153,7 +153,7 @@ export default function UploadForm({ categories, usedBytes, reservedBytes, quota
       const done = await postJson(`/api/uploads/${init.json.id}/complete`, { sha256 });
       if (done.status < 200 || done.status >= 300 || done.json.status !== "PUBLISHED") {
         setStage("idle");
-        setError(errorText(done.json, "Berkas ditolak. Kuota dikembalikan."));
+        setError(errorText(done.json, "Berkas tidak bisa diterbitkan."));
         router.refresh();
         return;
       }
