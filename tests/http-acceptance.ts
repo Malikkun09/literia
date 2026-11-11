@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import http from "node:http";
 import { hashPassword } from "better-auth/crypto";
 import { PrismaClient } from "@prisma/client";
+import { getStorage } from "../src/lib/storage";
 import { officePackage } from "./zip-fixture";
 
 const base = process.env.APP_URL ?? "http://localhost:3000";
@@ -204,6 +205,8 @@ async function main() {
 
     console.log("HTTP acceptance OK");
   } finally {
+    const documents = await db.document.findMany({ where: { ownerId: user.id }, select: { objectKey: true } });
+    await Promise.all(documents.map((document) => getStorage().remove(document.objectKey)));
     await db.user.delete({ where: { id: user.id } }).catch(() => undefined);
     await db.$disconnect();
   }

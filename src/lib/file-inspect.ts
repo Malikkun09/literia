@@ -23,18 +23,21 @@ type ZipEntry = {
   localOffset: number;
 };
 
-const OOXML_MAIN: Record<"docx" | "pptx" | "xlsx", { part: string; contentType: string }> = {
+const OOXML_MAIN: Record<"docx" | "pptx" | "xlsx", { part: string; contentType: string; root: RegExp }> = {
   docx: {
     part: "word/document.xml",
     contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+    root: /<w:document[\s>/]/,
   },
   pptx: {
     part: "ppt/presentation.xml",
     contentType: "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml",
+    root: /<p:presentation[\s>/]/,
   },
   xlsx: {
     part: "xl/workbook.xml",
     contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
+    root: /<workbook[\s>/]/,
   },
 };
 
@@ -301,14 +304,17 @@ function inspectOoxml(buffer: Buffer, extension: "docx" | "pptx" | "xlsx"): File
 
   const spec = OOXML_MAIN[extension];
   const contentTypes = findEntry(entries, "[Content_Types].xml");
+  const relationships = findEntry(entries, "_rels/.rels");
   const main = findEntry(entries, spec.part);
-  if (!contentTypes || !main) return rejected("Struktur paket Office tidak lengkap.");
+  if (!contentTypes || !relationships || !main) return rejected("Struktur paket Office tidak lengkap.");
 
   let typesXml = "";
-  let mainXml: Buffer;
+  let relsXml = "";
+  let mainXml = "";
   try {
     typesXml = readZipEntry(buffer, contentTypes).toString("utf8");
-    mainXml = readZipEntry(buffer, main);
+    relsXml = readZipEntry(buffer, relationships).toString("utf8");
+    mainXml = readZipEntry(buffer, main).toString("utf8");
   } catch (error) {
     const message = error instanceof Error ? error.message : "Paket dokumen rusak.";
     return rejected(message);
@@ -323,14 +329,15 @@ function inspectOoxml(buffer: Buffer, extension: "docx" | "pptx" | "xlsx"): File
   ) {
     return rejected("Paket Office berisi macro, HTML, atau skrip dan ditolak.");
   }
-  if (!typesLower.includes(spec.contentType.toLowerCase())) {
+  if (!typesLower.includes("<types") || !typesLower.includes(spec.contentType.toLowerCase())) {
     return rejected("Jenis paket Office tidak sesuai dengan ekstensi file.");
   }
-  const mainHead = mainXml.subarray(0, Math.min(mainXml.length, 200)).toString("utf8").trimStart();
-  if (!mainHead.startsWith("<")) return rejected("Isi dokumen Office rusak.");
-  if (/<script[\s>]/i.test(mainXml.toString("utf8").slice(0, 8000))) {
-    return rejected("Dokumen berisi skrip dan ditolak.");
+  if (!relsXml.includes("<Relationships") || !relsXml.includes(spec.part)) {
+    return rejected("Struktur paket Office tidak lengkap.");
   }
+  const mainHead = mainXml.trimStart().slice(0, 4000);
+  if (!spec.root.test(mainHead)) return rejected("Isi dokumen Office rusak.");
+  if (/<script[\s>]/i.test(mainXml)) return rejected("Dokumen berisi skrip dan ditolak.");
   return { ok: true };
 }
 

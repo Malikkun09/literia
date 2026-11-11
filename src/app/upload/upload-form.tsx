@@ -116,6 +116,7 @@ export default function UploadForm({ categories, usedBytes, reservedBytes, quota
       return;
     }
 
+    let sessionId: string | null = null;
     try {
       setStage("hash");
       setProgress(0);
@@ -136,12 +137,14 @@ export default function UploadForm({ categories, usedBytes, reservedBytes, quota
         router.refresh();
         return;
       }
+      sessionId = init.json.id;
 
       setStage("upload");
-      const uploaded = await postFile(`/api/uploads/${init.json.id}/content`, file, (ratio) => {
+      const uploaded = await postFile(`/api/uploads/${sessionId}/content`, file, (ratio) => {
         setProgress(Math.round(ratio * 100));
       });
       if (uploaded.status < 200 || uploaded.status >= 300) {
+        await fetch(`/api/uploads/${sessionId}/cancel`, { method: "POST" }).catch(() => undefined);
         setStage("idle");
         setError(errorText(uploaded.json, "Gagal mengunggah berkas. Kuota dikembalikan jika reservasi sudah dibuat."));
         router.refresh();
@@ -150,7 +153,7 @@ export default function UploadForm({ categories, usedBytes, reservedBytes, quota
 
       setStage("check");
       setProgress(100);
-      const done = await postJson(`/api/uploads/${init.json.id}/complete`, { sha256 });
+      const done = await postJson(`/api/uploads/${sessionId}/complete`, { sha256 });
       if (done.status < 200 || done.status >= 300 || done.json.status !== "PUBLISHED") {
         setStage("idle");
         setError(errorText(done.json, "Berkas tidak bisa diterbitkan."));
@@ -167,6 +170,9 @@ export default function UploadForm({ categories, usedBytes, reservedBytes, quota
       if (fileInput.current) fileInput.current.value = "";
       router.refresh();
     } catch (cause) {
+      if (sessionId) {
+        await fetch(`/api/uploads/${sessionId}/cancel`, { method: "POST" }).catch(() => undefined);
+      }
       setStage("idle");
       setError(cause instanceof Error ? cause.message : "Unggahan gagal.");
       router.refresh();

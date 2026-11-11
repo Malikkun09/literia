@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { resolveActor } from "@/lib/actor";
 import { writeAudit } from "@/lib/audit";
+import { clientAddress } from "@/lib/client-ip";
 import { getEnv } from "@/lib/env";
 import { rateLimit } from "@/lib/rate-limit";
 import type { CurrentUser } from "@/lib/session";
@@ -11,9 +12,7 @@ import { bigintToNumber } from "@/lib/format";
 const WINDOW_MS = 10 * 60 * 1000;
 
 function clientIp(request: Request): string {
-  const forwarded = request.headers.get("x-forwarded-for");
-  if (forwarded) return forwarded.split(",")[0]?.trim() || "unknown";
-  return request.headers.get("x-real-ip") ?? "unknown";
+  return clientAddress(request.headers);
 }
 
 function assertSameOrigin(request: Request): void {
@@ -82,12 +81,58 @@ export async function uploadErrorResponse(
     return NextResponse.json({ error: error.message, code: error.code }, { status: error.status, headers });
   }
   console.error(error);
+  if (actorId) {
+    await writeAudit({
+      actorId,
+      action,
+      targetType: "UploadSession",
+      targetId,
+      metadata: { code: "INTERNAL" },
+    }).catch((auditError) => {
+      console.error("audit log gagal", auditError);
+    });
+  }
   return NextResponse.json({ error: "Terjadi kesalahan pada server." }, { status: 500 });
+}
+
+export async function jsonWithQuota<T extends Record<string, unknown>>(
+  userId: string,
+  body: T,
+  status: number,
+): Promise<NextResponse> {
+  try {
+    return NextResponse.json(await withQuota(userId, body), { status });
+  } catch (error) {
+    console.error(error);
+    return NextResponse.json(body, { status });
+  }
 }
 
 export async function withQuota<T extends Record<string, unknown>>(userId: string, body: T) {
   const quota = await getQuotaSnapshot(userId);
   return { ...body, quota: quotaJson(quota) };
+}
+
+export async function readLimitedText(request: Request, maxBytes: number): Promise<string> {
+  const declared = request.headers.get("content-length");
+  if (declared && Number.isFinite(Number(declared)) && Number(declared) > maxBytes) {
+    throw new UploadError("TOO_LARGE", "Body permintaan terlalu besar.", 413);
+  }
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      throw new UploadError("TOO_LARGE", "Body permintaan terlalu besar.", 413);
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 export async function readLimitedBody(request: Request, maxBytes: number): Promise<Buffer> {

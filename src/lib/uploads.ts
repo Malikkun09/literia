@@ -6,7 +6,7 @@ import { extensionError, fileExtension, isAllowedExtension, MIME_BY_EXTENSION, s
 import { inspectUpload } from "@/lib/file-inspect";
 import { bigintToNumber, formatBytes } from "@/lib/format";
 import { slugify } from "@/lib/slug";
-import { generateObjectKey, getStorage } from "@/lib/storage";
+import { generateObjectKey, getStorage, sweepPartialUploads } from "@/lib/storage";
 import { UploadError } from "@/lib/upload-error";
 import { uploadInitSchema } from "@/lib/validation";
 
@@ -82,6 +82,7 @@ async function expireStaleReservations(userId: string): Promise<void> {
 }
 
 export async function getQuotaSnapshot(userId: string): Promise<QuotaSnapshot> {
+  await sweepPartialUploads().catch(() => undefined);
   await expireStaleReservations(userId);
   const [user, reserved] = await Promise.all([
     db.user.findUnique({
@@ -311,6 +312,16 @@ function failed(
     error: new UploadError(code, message, status),
     removeKey: session.document?.objectKey,
   };
+}
+
+export async function cancelUpload(userId: string, sessionId: string): Promise<void> {
+  const session = await loadReserved(userId, sessionId);
+  const released = await db.$transaction(async (tx) => {
+    const current = await lockSession(tx, session.id, userId);
+    if (!current || current.status !== "RESERVED") return false;
+    return releaseLocked(tx, current, "REJECTED", "Unggahan dibatalkan.");
+  }, CONTENT_LOCK);
+  if (released && session.document) await getStorage().remove(session.document.objectKey);
 }
 
 export async function saveUploadContent(userId: string, sessionId: string, data: Buffer): Promise<{ sizeBytes: number }> {

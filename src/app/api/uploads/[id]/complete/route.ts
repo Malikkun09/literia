@@ -1,13 +1,15 @@
-import { NextResponse } from "next/server";
 import { UploadError } from "@/lib/upload-error";
 import {
   enforceUploadRate,
+  jsonWithQuota,
+  readLimitedText,
   requireUploadUser,
   uploadErrorResponse,
-  withQuota,
 } from "@/lib/upload-http";
-import { uploadCompleteSchema } from "@/lib/validation";
 import { completeUpload } from "@/lib/uploads";
+import { uploadCompleteSchema } from "@/lib/validation";
+
+const JSON_LIMIT = 8 * 1024;
 
 type Context = { params: Promise<{ id: string }> };
 
@@ -20,7 +22,7 @@ export async function POST(request: Request, context: Context) {
     enforceUploadRate(user.id, "transfer");
 
     let claimed: string | undefined;
-    const raw = await request.text();
+    const raw = await readLimitedText(request, JSON_LIMIT);
     if (raw.trim()) {
       let json: unknown;
       try {
@@ -36,7 +38,7 @@ export async function POST(request: Request, context: Context) {
     }
 
     const result = await completeUpload(user.id, id, claimed);
-    return NextResponse.json(await withQuota(user.id, result));
+    return jsonWithQuota(user.id, result, 200);
   } catch (error) {
     return uploadErrorResponse(error, actorId, "upload.complete.denied", id);
   }

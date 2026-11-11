@@ -8,7 +8,7 @@ import {
   requireUploadUser,
   uploadErrorResponse,
 } from "@/lib/upload-http";
-import { saveUploadContent } from "@/lib/uploads";
+import { cancelUpload, saveUploadContent } from "@/lib/uploads";
 
 type Context = { params: Promise<{ id: string }> };
 
@@ -33,9 +33,7 @@ export async function POST(request: Request, context: Context) {
     try {
       data = await readLimitedBody(request, cap);
     } catch (error) {
-      if (error instanceof UploadError && (error.code === "TOO_LARGE" || error.code === "VALIDATION")) {
-        await saveUploadContent(user.id, id, Buffer.alloc(0)).catch(() => undefined);
-      }
+      await cancelUpload(user.id, id).catch(() => undefined);
       throw error;
     }
 

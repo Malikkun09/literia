@@ -22,7 +22,12 @@ export async function servePublishedDocument(id: string, disposition: "inline" |
     return NextResponse.json({ error: "Dokumen tidak ditemukan." }, { status: 404 });
   }
 
-  const data = await readVerifiedObject(document.objectKey, document.sha256);
+  let data: Buffer | "missing" | "mismatch";
+  try {
+    data = await readVerifiedObject(document.objectKey, document.sha256);
+  } catch {
+    return NextResponse.json({ error: "Terjadi kesalahan pada penyimpanan." }, { status: 500 });
+  }
   if (data === "mismatch") {
     await writeAudit({
       actorId: actor.user.id,
@@ -36,6 +41,10 @@ export async function servePublishedDocument(id: string, disposition: "inline" |
     return NextResponse.json({ error: "Berkas tidak tersedia di penyimpanan." }, { status: 404 });
   }
 
+  await recordAccess(id, actor.user.id, disposition).catch((error) => {
+    console.error("gagal mencatat akses dokumen", error);
+  });
+
   return new NextResponse(new Uint8Array(data), {
     status: 200,
     headers: {
@@ -46,4 +55,15 @@ export async function servePublishedDocument(id: string, disposition: "inline" |
       "Cache-Control": "private, no-store",
     },
   });
+}
+
+async function recordAccess(id: string, userId: string, disposition: "inline" | "attachment"): Promise<void> {
+  if (disposition === "inline") {
+    await db.document.update({ where: { id }, data: { viewCount: { increment: 1 } } });
+    return;
+  }
+  await db.$transaction([
+    db.document.update({ where: { id }, data: { downloadCount: { increment: 1 } } }),
+    db.downloadEvent.create({ data: { userId, documentId: id } }),
+  ]);
 }

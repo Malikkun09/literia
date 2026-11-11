@@ -1,5 +1,5 @@
 import { createHash, randomUUID, timingSafeEqual } from "crypto";
-import { mkdir, writeFile, readFile, unlink, stat, rename } from "fs/promises";
+import { mkdir, writeFile, readFile, unlink, stat, rename, readdir } from "fs/promises";
 import { join } from "path";
 import { createReadStream } from "fs";
 
@@ -70,6 +70,33 @@ export function getStorage(): StorageAdapter {
   return new LocalStorageAdapter();
 }
 
+let lastPartialSweep = 0;
+
+export async function sweepPartialUploads(maxAgeMs = 60 * 60 * 1000): Promise<void> {
+  const now = Date.now();
+  if (now - lastPartialSweep < 10 * 60 * 1000) return;
+  lastPartialSweep = now;
+  const root = storageRoot();
+  let entries: string[] = [];
+  try {
+    entries = await readdir(/*turbopackIgnore: true*/ root, { recursive: true });
+  } catch {
+    return;
+  }
+  await Promise.all(
+    entries.map(async (entry) => {
+      if (!entry.endsWith(".partial")) return;
+      const full = join(/*turbopackIgnore: true*/ root, entry);
+      try {
+        const info = await stat(/*turbopackIgnore: true*/ full);
+        if (now - info.mtimeMs > maxAgeMs) await unlink(/*turbopackIgnore: true*/ full);
+      } catch {
+        return;
+      }
+    }),
+  );
+}
+
 export async function readVerifiedObject(
   objectKey: string,
   sha256: string,
@@ -77,8 +104,9 @@ export async function readVerifiedObject(
   let data: Buffer;
   try {
     data = await getStorage().get(objectKey);
-  } catch {
-    return "missing";
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+    throw error;
   }
   const actual = createHash("sha256").update(data).digest("hex");
   const expected = sha256.toLowerCase();

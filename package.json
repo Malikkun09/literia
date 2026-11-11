@@ -10,7 +10,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --env-file=.env --import tsx --test tests/*.test.ts",
+    "test": "node --import ./scripts/load-env.mjs --import tsx --test tests/*.test.ts",
+    "test:http": "node --import ./scripts/load-env.mjs --import tsx tests/http-acceptance.ts",
     "seed": "tsx prisma/seed.ts"
   },
   "dependencies": {

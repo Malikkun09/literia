@@ -4,7 +4,7 @@ import { after, describe, it } from "node:test";
 import { db } from "../src/lib/db";
 import { getStorage, readVerifiedObject } from "../src/lib/storage";
 import { UploadError } from "../src/lib/upload-error";
-import { completeUpload, getQuotaSnapshot, initUpload, saveUploadContent } from "../src/lib/uploads";
+import { cancelUpload, completeUpload, getQuotaSnapshot, initUpload, saveUploadContent } from "../src/lib/uploads";
 import { officePackage } from "./zip-fixture";
 
 const createdUsers: string[] = [];
@@ -41,6 +41,11 @@ async function publish(userId: string, fileName: string, body: Buffer, title = "
 
 after(async () => {
   if (createdUsers.length > 0) {
+    const documents = await db.document.findMany({
+      where: { ownerId: { in: createdUsers } },
+      select: { objectKey: true },
+    });
+    await Promise.all(documents.map((document) => getStorage().remove(document.objectKey)));
     await db.user.deleteMany({ where: { id: { in: createdUsers } } });
   }
   await db.$disconnect();
@@ -226,6 +231,24 @@ describe("kuota atomik", () => {
         return true;
       },
     );
+  });
+
+  it("pembatalan melepas reservasi kuota", async () => {
+    const user = await makeUser(BigInt(1000));
+    const body = Buffer.from("batal");
+    const opened = await initUpload(user.id, {
+      title: "Dibatalkan",
+      fileName: "catatan.txt",
+      sizeBytes: body.length,
+      sha256: sha(body),
+    });
+    await cancelUpload(user.id, opened.id);
+    const quota = await getQuotaSnapshot(user.id);
+    assert.equal(quota.reservedBytes, BigInt(0));
+    assert.equal(quota.usedBytes, BigInt(0));
+    const document = await db.document.findUniqueOrThrow({ where: { id: opened.documentId } });
+    assert.equal(document.status, "REJECTED");
+    assert.equal(await getStorage().exists(document.objectKey), false);
   });
 
   it("penulisan setelah terbit tidak menimpa berkas yang sudah diperiksa", async () => {

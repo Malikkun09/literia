@@ -60,6 +60,21 @@ describe("isi berkas", () => {
     const macroVerdict = inspectUpload(macro, "docx");
     assert.equal(macroVerdict.ok, false);
     if (!macroVerdict.ok) assert.equal(macroVerdict.status, "REJECTED");
+
+    const brokenOffice = buildZip([
+      {
+        name: "[Content_Types].xml",
+        data: Buffer.from(
+          '<Types><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+        ),
+      },
+      {
+        name: "_rels/.rels",
+        data: Buffer.from('<Relationships><Relationship Target="word/document.xml"/></Relationships>'),
+      },
+      { name: "word/document.xml", data: Buffer.from("<bukan-dokumen/>") },
+    ]);
+    assert.equal(inspectUpload(brokenOffice, "docx").ok, false);
   });
 
   it("mengarantina PDF berisi skrip", () => {
