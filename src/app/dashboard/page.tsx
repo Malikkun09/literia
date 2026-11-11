@@ -1,4 +1,5 @@
 import { headers } from "next/headers";
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 
@@ -15,8 +16,14 @@ export default async function DashboardPage() {
       <p className="text-slate-600">
         Selamat datang, {session.user.name} ({session.user.email}).
       </p>
-      <p className="text-sm text-slate-500">
-        Katalog fungsional, upload, dan halaman anggota lainnya menyusul di Phase 2–3.
+      <p className="text-sm text-slate-600">
+        <Link href="/upload" className="underline">
+          Unggah dokumen
+        </Link>
+        {" · "}
+        <Link href="/katalog" className="underline">
+          Katalog
+        </Link>
       </p>
     </div>
   );

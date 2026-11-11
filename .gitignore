@@ -33,6 +33,12 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# private document storage
+/storage
+
+# local browser snapshots
+.playwright-mcp/
+
 # vercel
 .vercel
 

@@ -10,6 +10,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "test": "node --env-file=.env --import tsx --test tests/*.test.ts",
     "seed": "tsx prisma/seed.ts"
   },
   "dependencies": {

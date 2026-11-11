@@ -26,6 +26,33 @@ export const documentMetadataSchema = z.object({
   extension: z.enum(ALLOWED_EXTENSIONS),
 });
 
+const emptyToUndefined = (value: unknown) => (value === "" || value === null ? undefined : value);
+
+export const uploadInitSchema = z.object({
+  title: z.string().trim().min(3, "Judul minimal 3 karakter.").max(255, "Judul maksimal 255 karakter."),
+  description: z.preprocess(
+    emptyToUndefined,
+    z.string().trim().max(5000, "Deskripsi maksimal 5000 karakter.").optional(),
+  ),
+  categoryId: z.preprocess(emptyToUndefined, z.string().cuid("Kategori tidak valid.").optional()),
+  fileName: z.string().trim().min(1, "Nama file wajib diisi.").max(255, "Nama file terlalu panjang."),
+  sizeBytes: z.number().int("Ukuran file tidak valid.").positive("Ukuran file harus lebih dari 0."),
+  sha256: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .regex(/^[a-f0-9]{64}$/, "Checksum SHA-256 tidak valid."),
+});
+
+export const uploadCompleteSchema = z.object({
+  sha256: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .regex(/^[a-f0-9]{64}$/, "Checksum SHA-256 tidak valid.")
+    .optional(),
+});
+
 export const reportSchema = z.object({
   reason: z.string().trim().min(3).max(120),
   details: z.string().trim().max(2000).optional(),

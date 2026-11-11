@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import { mkdir, writeFile, readFile, unlink, stat } from "fs/promises";
+import { mkdir, writeFile, readFile, unlink, stat, rename } from "fs/promises";
 import { join } from "path";
 import { createReadStream } from "fs";
 
@@ -12,7 +12,7 @@ export interface StorageAdapter {
 }
 
 function storageRoot(): string {
-  return process.env.LITERIA_STORAGE_DIR ?? join(process.cwd(), "storage");
+  return process.env.LITERIA_STORAGE_DIR ?? join(/*turbopackIgnore: true*/ process.cwd(), "storage");
 }
 
 function safeKey(objectKey: string): string {
@@ -22,32 +22,39 @@ function safeKey(objectKey: string): string {
   return objectKey;
 }
 
+function objectPath(objectKey: string): string {
+  return join(/*turbopackIgnore: true*/ storageRoot(), safeKey(objectKey));
+}
+
 export class LocalStorageAdapter implements StorageAdapter {
   async put(objectKey: string, data: Buffer): Promise<void> {
-    const key = safeKey(objectKey);
-    const full = join(storageRoot(), key);
-    await mkdir(join(full, ".."), { recursive: true });
-    await writeFile(full, data);
+    const full = objectPath(objectKey);
+    await mkdir(/*turbopackIgnore: true*/ join(full, ".."), { recursive: true });
+    const tmp = `${full}.${randomUUID()}.partial`;
+    try {
+      await writeFile(/*turbopackIgnore: true*/ tmp, data);
+      await rename(/*turbopackIgnore: true*/ tmp, full);
+    } catch (error) {
+      await unlink(/*turbopackIgnore: true*/ tmp).catch(() => undefined);
+      throw error;
+    }
   }
 
   async get(objectKey: string): Promise<Buffer> {
-    const full = join(storageRoot(), safeKey(objectKey));
-    return readFile(full);
+    return readFile(/*turbopackIgnore: true*/ objectPath(objectKey));
   }
 
   stream(objectKey: string): NodeJS.ReadableStream {
-    const full = join(storageRoot(), safeKey(objectKey));
-    return createReadStream(full);
+    return createReadStream(/*turbopackIgnore: true*/ objectPath(objectKey));
   }
 
   async remove(objectKey: string): Promise<void> {
-    const full = join(storageRoot(), safeKey(objectKey));
-    await unlink(full).catch(() => undefined);
+    await unlink(/*turbopackIgnore: true*/ objectPath(objectKey)).catch(() => undefined);
   }
 
   async exists(objectKey: string): Promise<boolean> {
     try {
-      await stat(join(storageRoot(), safeKey(objectKey)));
+      await stat(/*turbopackIgnore: true*/ objectPath(objectKey));
       return true;
     } catch {
       return false;
