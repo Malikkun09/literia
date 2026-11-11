@@ -380,7 +380,9 @@ export async function completeUpload(userId: string, sessionId: string, claimedS
     };
   }
 
-  const outcome = await db.$transaction(async (tx): Promise<PublishOutcome> => {
+  let outcome: PublishOutcome;
+  try {
+    outcome = await db.$transaction(async (tx): Promise<PublishOutcome> => {
     const current = await lockSession(tx, session.id, userId);
     if (!current) return { ok: false, error: new UploadError("NOT_FOUND", "Sesi unggah tidak ditemukan.", 404) };
     if (current.status === "COMPLETED" && current.document?.status === "PUBLISHED") {
@@ -507,7 +509,12 @@ export async function completeUpload(userId: string, sessionId: string, claimedS
       data: { storageUsedBytes: { increment: BigInt(data.length) } },
     });
     return { ok: true, already: false, documentId: current.document.id, slug: current.document.slug };
-  }, CONTENT_LOCK);
+    }, CONTENT_LOCK);
+  } catch (error) {
+    await releaseReservation(session, "Gagal menyelesaikan unggahan.").catch(() => undefined);
+    if (error instanceof UploadError) throw error;
+    throw new UploadError("REJECTED", "Gagal menyelesaikan unggahan. Kuota dikembalikan.", 500);
+  }
 
   if (!outcome.ok) {
     if (outcome.removeKey) await getStorage().remove(outcome.removeKey);

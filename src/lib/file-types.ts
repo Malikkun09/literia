@@ -71,7 +71,9 @@ export function extensionError(fileName: string): string | null {
   if (!ext) {
     return "Nama file harus ber-ekstensi pdf, docx, pptx, xlsx, txt, atau csv.";
   }
-  const blocked = BLOCKED_EXTENSION_MESSAGES[ext];
+  const blocked = Object.prototype.hasOwnProperty.call(BLOCKED_EXTENSION_MESSAGES, ext)
+    ? BLOCKED_EXTENSION_MESSAGES[ext]
+    : undefined;
   if (blocked) return blocked;
   if (!isAllowedExtension(ext)) {
     return `Ekstensi .${ext} tidak diizinkan. Yang diterima: pdf, docx, pptx, xlsx, txt, csv.`;

@@ -286,17 +286,26 @@ describe("kuota atomik", () => {
         sha256: sha(good),
       });
       await saveUploadContent(user.id, opened.id, good);
-      await Promise.allSettled([
+      const [write, finish] = await Promise.allSettled([
         saveUploadContent(user.id, opened.id, bad),
         completeUpload(user.id, opened.id, sha(good)),
       ]);
       const document = await db.document.findUniqueOrThrow({ where: { id: opened.documentId } });
-      if (document.status === "PUBLISHED") {
+      if (finish.status === "fulfilled") {
+        assert.equal(finish.value.status, "PUBLISHED");
+        assert.equal(write.status, "rejected");
+        assert.ok(write.reason instanceof UploadError);
+        assert.equal(write.reason.code, "CONFLICT");
+        assert.equal(document.status, "PUBLISHED");
         const stored = await getStorage().get(document.objectKey);
         assert.equal(sha(stored), sha(good));
         assert.equal(document.sha256, sha(good));
         continue;
       }
+      assert.equal(write.status, "fulfilled");
+      assert.ok(finish.reason instanceof UploadError);
+      assert.equal(finish.reason.code, "REJECTED");
+      assert.match(finish.reason.message, /Checksum/);
       assert.equal(document.status, "REJECTED");
       assert.equal(await getStorage().exists(document.objectKey), false);
       const quota = await getQuotaSnapshot(user.id);

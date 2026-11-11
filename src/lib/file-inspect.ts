@@ -283,7 +283,7 @@ function dangerousEntry(name: string): boolean {
   const lower = name.toLowerCase();
   if (lower.endsWith("/")) return false;
   if (lower.includes("vbaproject") || lower.includes("vbaData".toLowerCase())) return true;
-  if (lower.includes("oleobject") || lower.includes("embeddings/")) return true;
+  if (lower.includes("oleobject") || lower.includes("embeddings/") || lower.includes("activex")) return true;
   return /\.(exe|dll|js|mjs|cjs|html?|hta|bat|cmd|ps1|scr|docm|xlsm|pptm)$/.test(lower);
 }
 
@@ -324,6 +324,7 @@ function inspectOoxml(buffer: Buffer, extension: "docx" | "pptx" | "xlsx"): File
   if (
     typesLower.includes("macroenabled") ||
     typesLower.includes("vbaproject") ||
+    typesLower.includes("activex") ||
     typesLower.includes("text/html") ||
     typesLower.includes("javascript")
   ) {
@@ -372,6 +373,61 @@ function inspectText(buffer: Buffer): FileVerdict {
   return { ok: true };
 }
 
+function formulaCell(raw: string): boolean {
+  const value = raw.trim();
+  if (!value) return false;
+  const first = value[0];
+  if (first === "=" || first === "@" || first === "\t") return true;
+  if (first === "+") return !/^\+\d[\d\s().-]*$/.test(value);
+  if (first === "-") return !/^-(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(value);
+  return false;
+}
+
+function csvHasFormula(text: string): boolean {
+  let field = "";
+  let inQuotes = false;
+  const flush = (): boolean => {
+    const dangerous = formulaCell(field);
+    field = "";
+    return dangerous;
+  };
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    if (inQuotes) {
+      if (char === '"') {
+        if (text[i + 1] === '"') {
+          field += '"';
+          i += 1;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        field += char;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inQuotes = true;
+      continue;
+    }
+    if (char === "," || char === ";" || char === "\t" || char === "\n" || char === "\r") {
+      if (flush()) return true;
+      if (char === "\r" && text[i + 1] === "\n") i += 1;
+      continue;
+    }
+    field += char;
+  }
+  return flush();
+}
+
+function inspectCsv(buffer: Buffer): FileVerdict {
+  const textVerdict = inspectText(buffer);
+  if (!textVerdict.ok) return textVerdict;
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(buffer).replace(/^\uFEFF/, "");
+  if (csvHasFormula(text)) return rejected("CSV berisi rumus spreadsheet dan ditolak.");
+  return { ok: true };
+}
+
 export function inspectUpload(buffer: Buffer, extension: AllowedExtension): FileVerdict {
   if (buffer.length === 0) return rejected("File kosong ditolak.");
   const kind = sniff(buffer);
@@ -390,5 +446,6 @@ export function inspectUpload(buffer: Buffer, extension: AllowedExtension): File
   if (blocked || kind === "binary" || kind === "pdf" || kind === "zip") {
     return rejected(blocked ?? "Isi file tidak sesuai dokumen teks.");
   }
+  if (extension === "csv") return inspectCsv(buffer);
   return inspectText(buffer);
 }

@@ -22,6 +22,9 @@ describe("ekstensi", () => {
     assert.match(extensionError("rahasia.exe.pdf") ?? "", /menyembunyikan/i);
     assert.equal(extensionError("catatan.txt"), null);
     assert.equal(extensionError("modul.DOCX"), null);
+    assert.match(extensionError("foo.__proto__") ?? "", /tidak diizinkan/);
+    assert.match(extensionError("foo.constructor") ?? "", /tidak diizinkan/);
+    assert.equal(typeof extensionError("foo.toString"), "string");
   });
 });
 
@@ -32,7 +35,8 @@ describe("isi berkas", () => {
     assert.equal(inspectUpload(officePackage("pptx", [], 8), "pptx").ok, true);
     assert.equal(inspectUpload(officePackage("xlsx"), "xlsx").ok, true);
     assert.equal(inspectUpload(Buffer.from("Catatan komunitas\nBaris kedua\n"), "txt").ok, true);
-    assert.equal(inspectUpload(Buffer.from("nama,nilai\nAni,90\n"), "csv").ok, true);
+    assert.equal(inspectUpload(Buffer.from("nama,nilai\nAni,90\nBudi,-1.5\n"), "csv").ok, true);
+    assert.equal(inspectUpload(Buffer.from("telepon\n+62 812-3456-7890\n"), "csv").ok, true);
   });
 
   it("menolak berkas terlarang, rusak, dan macro", () => {
@@ -55,6 +59,10 @@ describe("isi berkas", () => {
     assert.equal(inspectUpload(wav, "txt").ok, false);
     assert.equal(inspectUpload(html, "txt").ok, false);
     assert.equal(inspectUpload(script, "csv").ok, false);
+    const formula = inspectUpload(Buffer.from('nama,nilai\nAni,"=cmd|\'/c calc\'!A0"\n'), "csv");
+    assert.equal(formula.ok, false);
+    if (!formula.ok) assert.match(formula.message, /rumus/);
+    assert.equal(inspectUpload(Buffer.from("nama;rumus\nAni;@SUM(A1)\n"), "csv").ok, false);
     assert.equal(inspectUpload(zip, "docx").ok, false);
     assert.equal(inspectUpload(zip, "txt").ok, false);
     const macroVerdict = inspectUpload(macro, "docx");
@@ -82,15 +90,34 @@ describe("isi berkas", () => {
     const verdict = inspectUpload(active, "pdf");
     assert.equal(verdict.ok, false);
     if (!verdict.ok) assert.equal(verdict.status, "QUARANTINED");
+
+    const crOnly = Buffer.from("%PDF-1.4\r1 0 obj<</JavaScript (alert)>>endobj\r%%EOF\r");
+    const crVerdict = inspectUpload(crOnly, "pdf");
+    assert.equal(crVerdict.ok, false);
+    if (!crVerdict.ok) assert.equal(crVerdict.status, "QUARANTINED");
+
+    const comment = Buffer.from("%PDF-1.4\r% /JavaScript hanya komentar\r1 0 obj<<>>endobj\r%%EOF\r");
+    assert.equal(inspectUpload(comment, "pdf").ok, true);
+
+    const attachment = Buffer.from("%PDF-1.4\n1 0 obj<</Subtype /FileAttachment /FS << /F (rahasia.pdf) >>>>endobj\n%%EOF\n");
+    const attachmentVerdict = inspectUpload(attachment, "pdf");
+    assert.equal(attachmentVerdict.ok, false);
+    if (!attachmentVerdict.ok) assert.equal(attachmentVerdict.status, "QUARANTINED");
   });
 
   it("menolak nama berkas berbahaya di dalam paket", () => {
-    const slipped = buildZip([
-      { name: "../rahasia.txt", data: Buffer.from("x") },
-      { name: "[Content_Types].xml", data: Buffer.from("<Types/>") },
-    ]);
+    const slipped = officePackage("docx", [{ name: "../rahasia.txt", data: Buffer.from("x") }]);
     const verdict = inspectUpload(slipped, "docx");
     assert.equal(verdict.ok, false);
+    if (!verdict.ok) assert.match(verdict.message, /tidak aman/);
+
+    const activex = officePackage("docx", [{ name: "word/activeX/activeX1.xml", data: Buffer.from("<ax/>") }]);
+    const active = inspectUpload(activex, "docx");
+    assert.equal(active.ok, false);
+    if (!active.ok) {
+      assert.equal(active.status, "REJECTED");
+      assert.match(active.message, /objek aktif/);
+    }
   });
 
   it("memeriksa objek PDF yang disembunyikan di stream terkompresi", () => {
@@ -149,11 +176,24 @@ describe("isi berkas", () => {
 
     const body = deflateSync(Buffer.from("BT (Halo) Tj ET"));
     const indirect = Buffer.concat([
-      Buffer.from("%PDF-1.4\n1 0 obj\n<< /Filter /FlateDecode /Length 2 0 R >>\nstream\n"),
+      Buffer.from("%PDF-1.4\n1 0 obj\n<< /Filter /FlateDecode /Length 3 0 R >>\nstream\n"),
       body,
-      Buffer.from(`\nendstream\nendobj\n2 0 obj\n${body.length}\nendobj\n%%EOF\n`),
+      Buffer.from("\nendstream\nendobj\n2 0 obj\n<< /Filter /FlateDecode /Length 4 0 R >>\nstream\n"),
+      body,
+      Buffer.from(`\nendstream\nendobj\n3 0 obj\n${body.length}\nendobj\n4 0 obj\n${body.length}\nendobj\n%%EOF\n`),
     ]);
     assert.equal(inspectUpload(indirect, "pdf").ok, true);
+
+    const crHidden = deflateSync(Buffer.from("9 0 << /S /JavaScript /JS (alert) >>"));
+    const crStream = Buffer.concat([
+      Buffer.from(`%PDF-1.4\r1 0 obj\r<< /Type /ObjStm /N 1 /First 4 /Filter /FlateDecode /Length ${crHidden.length} >>\rstream\r`),
+      crHidden,
+      Buffer.from("\rendstream\rendobj\r%%EOF\r"),
+    ]);
+    assert.equal(crStream.includes(Buffer.from("/JavaScript")), false);
+    const crStreamVerdict = inspectUpload(crStream, "pdf");
+    assert.equal(crStreamVerdict.ok, false);
+    if (!crStreamVerdict.ok) assert.equal(crStreamVerdict.status, "QUARANTINED");
   });
 });
 

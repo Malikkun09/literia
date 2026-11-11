@@ -18,6 +18,7 @@ const ACTIVE_NAMES = new Set([
   "XFA",
   "SubmitForm",
   "ImportData",
+  "FileAttachment",
 ]);
 
 const SKIP_BODY = new Set(["Image", "XRef", "FontFile", "FontFile2", "FontFile3"]);
@@ -105,8 +106,10 @@ function pdfNames(text: string): string[] {
   while (i < text.length) {
     const char = text[i];
     if (char === "%") {
-      const newline = text.indexOf("\n", i);
-      i = newline < 0 ? text.length : newline + 1;
+      let j = i + 1;
+      while (j < text.length && text[j] !== "\n" && text[j] !== "\r") j += 1;
+      if (text[j] === "\r" && text[j + 1] === "\n") j += 1;
+      i = j < text.length ? j + 1 : text.length;
       continue;
     }
     if (char === "(") {
@@ -166,9 +169,10 @@ function findStream(buffer: Buffer, from: number): number {
     const idx = buffer.indexOf("stream", pos);
     if (idx < 0) return -1;
     const before = idx > 0 ? buffer[idx - 1] : undefined;
-    const crlf = buffer[idx + 6] === 0x0d && buffer[idx + 7] === 0x0a;
-    const lf = buffer[idx + 6] === 0x0a;
-    if (isDelimiter(before) && (crlf || lf)) return idx;
+    const after = idx + 6;
+    const crlf = buffer[after] === 0x0d && buffer[after + 1] === 0x0a;
+    const eol = crlf || buffer[after] === 0x0a || buffer[after] === 0x0d;
+    if (isDelimiter(before) && eol) return idx;
     pos = idx + 6;
   }
   return -1;
@@ -334,7 +338,7 @@ function readPredictor(dict: string): number | "indirect" {
 function streamDataStart(buffer: Buffer, streamIdx: number): number | null {
   const after = streamIdx + 6;
   if (buffer[after] === 0x0d && buffer[after + 1] === 0x0a) return after + 2;
-  if (buffer[after] === 0x0a) return after + 1;
+  if (buffer[after] === 0x0a || buffer[after] === 0x0d) return after + 1;
   return null;
 }
 
@@ -349,32 +353,46 @@ function matchEndstream(buffer: Buffer, dataEnd: number): number | null {
   return null;
 }
 
-function resolveIndirectLengths(buffer: Buffer, id: string, gen: string): number[] {
-  const marker = Buffer.from(`${id} ${gen} obj`);
-  const values: number[] = [];
-  let from = 0;
-  const pattern = new RegExp(`^${id} ${gen} obj\\s+(\\d+)\\s+endobj`);
-  while (from < buffer.length) {
-    const at = buffer.indexOf(marker, from);
-    if (at < 0) break;
-    const slice = buffer.subarray(at, Math.min(buffer.length, at + marker.length + 48)).toString("latin1");
-    const match = pattern.exec(slice);
-    if (match) {
-      const value = Number(match[1]);
-      if (Number.isSafeInteger(value) && value >= 0) values.push(value);
+const MAX_INDEXED_INTEGERS = 100_000;
+const MAX_LENGTH_CANDIDATES = 8;
+
+function indexIndirectIntegers(buffer: Buffer): Map<string, number[]> {
+  const text = buffer.toString("latin1");
+  const values = new Map<string, number[]>();
+  const header = /(?:^|[\0\t\n\f\r ()<>\[\]{}/%])(\d+) (\d+) obj/g;
+  let match: RegExpExecArray | null;
+  while ((match = header.exec(text)) !== null) {
+    const bodyAt = match.index + match[0].length;
+    const num = /^\s+(\d+)\s+endobj/.exec(text.slice(bodyAt, bodyAt + 64));
+    if (!num) continue;
+    const value = Number(num[1]);
+    if (!Number.isSafeInteger(value) || value < 0) continue;
+    const key = `${match[1]} ${match[2]}`;
+    const list = values.get(key);
+    if (list) {
+      if (list.length < MAX_LENGTH_CANDIDATES) list.push(value);
+      continue;
     }
-    from = at + marker.length;
+    if (values.size >= MAX_INDEXED_INTEGERS) {
+      throw new PdfInspectError("PDF terlalu besar untuk diperiksa.");
+    }
+    values.set(key, [value]);
   }
   return values;
 }
 
 type BoundStream = { dataStart: number; length: number; end: number };
 
-function boundStream(buffer: Buffer, streamIdx: number, dict: string): BoundStream | null {
+function boundStream(
+  buffer: Buffer,
+  streamIdx: number,
+  dict: string,
+  integers: Map<string, number[]>,
+): BoundStream | null {
   const spec = topLevelLength(dict);
   const dataStart = streamDataStart(buffer, streamIdx);
   if (!spec || dataStart === null) return null;
-  const lengths = spec.kind === "direct" ? [spec.value] : resolveIndirectLengths(buffer, spec.id, spec.gen);
+  const lengths = spec.kind === "direct" ? [spec.value] : (integers.get(`${spec.id} ${spec.gen}`) ?? []);
   for (const length of lengths) {
     if (!Number.isSafeInteger(length) || length < 0) continue;
     if (dataStart + length > buffer.length) continue;
@@ -415,6 +433,7 @@ function decodeScannedBody(raw: Buffer, dict: string): Buffer {
 function collectPdfText(buffer: Buffer): { clear: string; bodies: string[] } {
   const parts: Buffer[] = [];
   const bodies: string[] = [];
+  const integers = indexIndirectIntegers(buffer);
   let cursor = 0;
   let decodedTotal = 0;
 
@@ -431,7 +450,7 @@ function collectPdfText(buffer: Buffer): { clear: string; bodies: string[] } {
     }
     const dict = dictionaryBefore(buffer, idx);
     if (!dict) throw new PdfInspectError("PDF berisi stream yang tidak bisa diperiksa.");
-    const bound = boundStream(buffer, idx, dict);
+    const bound = boundStream(buffer, idx, dict, integers);
     if (!bound) throw new PdfInspectError("PDF berisi stream yang tidak bisa diperiksa.");
     parts.push(buffer.subarray(cursor, idx));
     if (shouldScan(dict)) {
