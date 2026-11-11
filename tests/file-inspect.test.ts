@@ -184,6 +184,15 @@ describe("isi berkas", () => {
     ]);
     assert.equal(inspectUpload(indirect, "pdf").ok, true);
 
+    const revisedBody = Buffer.from("BT (Revisi) Tj ET");
+    const older = Array.from({ length: 8 }, (_, index) => `2 0 obj\n${index}\nendobj\n`).join("");
+    const revised = Buffer.concat([
+      Buffer.from("%PDF-1.4\n1 0 obj\n<< /Length 2 0 R >>\nstream\n"),
+      revisedBody,
+      Buffer.from(`\nendstream\nendobj\n${older}2 0 obj\n${revisedBody.length}\nendobj\n%%EOF\n`),
+    ]);
+    assert.equal(inspectUpload(revised, "pdf").ok, true);
+
     const crHidden = deflateSync(Buffer.from("9 0 << /S /JavaScript /JS (alert) >>"));
     const crStream = Buffer.concat([
       Buffer.from(`%PDF-1.4\r1 0 obj\r<< /Type /ObjStm /N 1 /First 4 /Filter /FlateDecode /Length ${crHidden.length} >>\rstream\r`),

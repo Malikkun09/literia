@@ -370,7 +370,8 @@ function indexIndirectIntegers(buffer: Buffer): Map<string, number[]> {
     const key = `${match[1]} ${match[2]}`;
     const list = values.get(key);
     if (list) {
-      if (list.length < MAX_LENGTH_CANDIDATES) list.push(value);
+      list.push(value);
+      if (list.length > MAX_LENGTH_CANDIDATES) list.shift();
       continue;
     }
     if (values.size >= MAX_INDEXED_INTEGERS) {

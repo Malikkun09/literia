@@ -342,19 +342,28 @@ function inspectOoxml(buffer: Buffer, extension: "docx" | "pptx" | "xlsx"): File
   return { ok: true };
 }
 
-function inspectText(buffer: Buffer): FileVerdict {
+function decodePlainText(buffer: Buffer): { text: string } | FileVerdict {
   if (buffer.includes(0)) return rejected("File teks berisi data biner dan ditolak.");
   for (const byte of buffer) {
     if (byte === 9 || byte === 10 || byte === 13) continue;
     if (byte < 32 || byte === 127) return rejected("File teks berisi data biner dan ditolak.");
   }
-  let text: string;
   try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(buffer).replace(/^\uFEFF/, "");
+    return { text };
   } catch {
     return rejected("File teks harus UTF-8 yang valid.");
   }
-  const trimmed = text.replace(/^\uFEFF/, "").trimStart();
+}
+
+function inspectText(buffer: Buffer): FileVerdict {
+  const decoded = decodePlainText(buffer);
+  if (!("text" in decoded)) return decoded;
+  return inspectDecodedText(decoded.text);
+}
+
+function inspectDecodedText(text: string): FileVerdict {
+  const trimmed = text.trimStart();
   const head = trimmed.slice(0, 200).toLowerCase();
   if (
     head.startsWith("<!doctype html") ||
@@ -421,10 +430,11 @@ function csvHasFormula(text: string): boolean {
 }
 
 function inspectCsv(buffer: Buffer): FileVerdict {
-  const textVerdict = inspectText(buffer);
-  if (!textVerdict.ok) return textVerdict;
-  const text = new TextDecoder("utf-8", { fatal: true }).decode(buffer).replace(/^\uFEFF/, "");
-  if (csvHasFormula(text)) return rejected("CSV berisi rumus spreadsheet dan ditolak.");
+  const decoded = decodePlainText(buffer);
+  if (!("text" in decoded)) return decoded;
+  const verdict = inspectDecodedText(decoded.text);
+  if (!verdict.ok) return verdict;
+  if (csvHasFormula(decoded.text)) return rejected("CSV berisi rumus spreadsheet dan ditolak.");
   return { ok: true };
 }
 
