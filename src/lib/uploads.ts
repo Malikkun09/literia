@@ -6,7 +6,7 @@ import { extensionError, fileExtension, isAllowedExtension, MIME_BY_EXTENSION, s
 import { inspectUpload } from "@/lib/file-inspect";
 import { bigintToNumber, formatBytes } from "@/lib/format";
 import { slugify } from "@/lib/slug";
-import { generateObjectKey, getStorage, sweepPartialUploads } from "@/lib/storage";
+import { generateObjectKey, getStorage } from "@/lib/storage";
 import { UploadError } from "@/lib/upload-error";
 import { uploadInitSchema } from "@/lib/validation";
 
@@ -82,7 +82,6 @@ async function expireStaleReservations(userId: string): Promise<void> {
 }
 
 export async function getQuotaSnapshot(userId: string): Promise<QuotaSnapshot> {
-  await sweepPartialUploads().catch(() => undefined);
   await expireStaleReservations(userId);
   const [user, reserved] = await Promise.all([
     db.user.findUnique({

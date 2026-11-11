@@ -70,32 +70,51 @@ export function getStorage(): StorageAdapter {
   return new LocalStorageAdapter();
 }
 
-let lastPartialSweep = 0;
+let sweepRunning = false;
 
 export async function sweepPartialUploads(maxAgeMs = 60 * 60 * 1000): Promise<void> {
-  const now = Date.now();
-  if (now - lastPartialSweep < 10 * 60 * 1000) return;
-  lastPartialSweep = now;
-  const root = storageRoot();
-  let entries: string[] = [];
+  if (sweepRunning) return;
+  sweepRunning = true;
   try {
-    entries = await readdir(/*turbopackIgnore: true*/ root, { recursive: true });
-  } catch {
-    return;
+    const now = Date.now();
+    const root = storageRoot();
+    let entries: string[] = [];
+    try {
+      entries = await readdir(/*turbopackIgnore: true*/ root, { recursive: true });
+    } catch {
+      return;
+    }
+    await Promise.all(
+      entries.map(async (entry) => {
+        if (!entry.endsWith(".partial")) return;
+        const full = join(/*turbopackIgnore: true*/ root, entry);
+        try {
+          const info = await stat(/*turbopackIgnore: true*/ full);
+          if (now - info.mtimeMs > maxAgeMs) await unlink(/*turbopackIgnore: true*/ full);
+        } catch {
+          return;
+        }
+      }),
+    );
+  } finally {
+    sweepRunning = false;
   }
-  await Promise.all(
-    entries.map(async (entry) => {
-      if (!entry.endsWith(".partial")) return;
-      const full = join(/*turbopackIgnore: true*/ root, entry);
-      try {
-        const info = await stat(/*turbopackIgnore: true*/ full);
-        if (now - info.mtimeMs > maxAgeMs) await unlink(/*turbopackIgnore: true*/ full);
-      } catch {
-        return;
-      }
-    }),
-  );
 }
+
+function startPartialSweep(): void {
+  const state = globalThis as typeof globalThis & { __literiaPartialSweep?: boolean };
+  if (state.__literiaPartialSweep) return;
+  state.__literiaPartialSweep = true;
+  const run = () => {
+    void sweepPartialUploads().catch(() => undefined);
+  };
+  const first = setTimeout(run, 15_000);
+  const timer = setInterval(run, 10 * 60 * 1000);
+  first.unref();
+  timer.unref();
+}
+
+if (process.env.NEXT_PHASE !== "phase-production-build") startPartialSweep();
 
 export async function readVerifiedObject(
   objectKey: string,

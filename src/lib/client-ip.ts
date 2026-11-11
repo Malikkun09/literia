@@ -1,9 +1,7 @@
+import { isIP } from "node:net";
+
 function isIp(value: string): boolean {
-  if (value.length === 0 || value.length > 64) return false;
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) {
-    return value.split(".").every((part) => Number(part) <= 255);
-  }
-  return value.includes(":") && /^[0-9a-fA-F:.]+$/.test(value);
+  return isIP(value) !== 0;
 }
 
 export function clientAddress(headers: Headers): string {

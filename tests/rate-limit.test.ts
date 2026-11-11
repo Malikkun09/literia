@@ -25,6 +25,16 @@ describe("rate limit unggah", () => {
     assert.equal(rateLimit("keep", 2, 60_000).ok, true);
     assert.equal(rateLimit("keep", 2, 60_000).ok, false);
   });
+
+  it("mengusir jendela yang sudah lewat tanpa melepas jendela yang lebih panjang", () => {
+    resetRateLimits();
+    assert.equal(rateLimit("long", 1, 60_000, 1_000).ok, true);
+    for (let i = 0; i < 9_999; i += 1) {
+      assert.equal(rateLimit(`old-${i}`, 1, 1_000, 1_000).ok, true);
+    }
+    assert.equal(rateLimit("new", 1, 1_000, 2_500).ok, true);
+    assert.equal(rateLimit("long", 1, 60_000, 2_500).ok, false);
+  });
 });
 
 describe("alamat klien", () => {
@@ -36,5 +46,12 @@ describe("alamat klien", () => {
     assert.equal(clientAddress(headers), "198.51.100.10");
     const proxied = new Headers({ "x-forwarded-for": "1.2.3.4, 203.0.113.8" });
     assert.equal(clientAddress(proxied), "203.0.113.8");
+    const malformed = new Headers({
+      "cf-connecting-ip": "dead:beef",
+      "x-forwarded-for": ":, 203.0.113.8",
+    });
+    assert.equal(clientAddress(malformed), "203.0.113.8");
+    assert.equal(clientAddress(new Headers({ "x-real-ip": "2001:db8::1" })), "2001:db8::1");
+    assert.equal(clientAddress(new Headers({ "cf-connecting-ip": ":" })), "unknown");
   });
 });
