@@ -1,0 +1,234 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  MEMBER
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum DocumentStatus {
+  SCANNING
+  PUBLISHED
+  QUARANTINED
+  REJECTED
+  HIDDEN
+  DELETED
+}
+
+enum ReportStatus {
+  OPEN
+  REVIEWED
+  DISMISSED
+  ACTIONED
+}
+
+model User {
+  id                String     @id @default(cuid())
+  name              String
+  email             String     @unique
+  emailVerified     Boolean    @default(false)
+  image             String?
+  role              UserRole   @default(MEMBER)
+  status            UserStatus @default(ACTIVE)
+  storageUsedBytes  BigInt     @default(0)
+  storageQuotaBytes BigInt     @default(1000000000)
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  sessions        Session[]
+  accounts        Account[]
+  documents       Document[]
+  favorites       Favorite[]
+  downloadEvents  DownloadEvent[]
+  reportsFiled    DocumentReport[] @relation("ReportReporter")
+  reportsReviewed DocumentReport[] @relation("ReportReviewer")
+  uploadSessions  UploadSession[]
+  auditActions    AuditLog[]
+
+  @@index([email])
+  @@index([role, status])
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  expiresAt DateTime
+  token     String   @unique
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Account {
+  id                    String    @id @default(cuid())
+  userId                String
+  accountId             String
+  providerId            String
+  accessToken           String?
+  refreshToken          String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  idToken               String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+}
+
+model Category {
+  id          String     @id @default(cuid())
+  name        String     @unique
+  slug        String     @unique
+  description String?
+  createdAt   DateTime   @default(now())
+
+  documents Document[]
+}
+
+model Document {
+  id               String         @id @default(cuid())
+  slug             String         @unique
+  title            String
+  description      String?
+  originalFileName String
+  objectKey        String         @unique
+  extension        String
+  mimeType         String
+  sizeBytes        BigInt
+  sha256           String
+  ownerId          String
+  categoryId       String?
+  status           DocumentStatus @default(SCANNING)
+  scanStatus       String?
+  scanMessage      String?
+  viewCount        Int            @default(0)
+  downloadCount    Int            @default(0)
+  publishedAt      DateTime?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  owner         User           @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  category      Category?      @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  favorites     Favorite[]
+  downloadEvents DownloadEvent[]
+  reports       DocumentReport[]
+  uploadSessions UploadSession[]
+
+  @@index([status, publishedAt])
+  @@index([ownerId])
+  @@index([categoryId])
+  @@index([slug])
+}
+
+model Favorite {
+  userId     String
+  documentId String
+  createdAt  DateTime @default(now())
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@id([userId, documentId])
+  @@index([userId])
+}
+
+model DownloadEvent {
+  id         String   @id @default(cuid())
+  userId     String
+  documentId String
+  createdAt  DateTime @default(now())
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([documentId])
+}
+
+model DocumentReport {
+  id         String       @id @default(cuid())
+  reporterId String
+  documentId String
+  reason     String
+  details    String?
+  status     ReportStatus @default(OPEN)
+  reviewedBy String?
+  reviewedAt DateTime?
+  createdAt  DateTime     @default(now())
+
+  reporter User      @relation("ReportReporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  document Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  reviewer User?     @relation("ReportReviewer", fields: [reviewedBy], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@index([documentId])
+}
+
+model UploadSession {
+  id                String    @id @default(cuid())
+  userId            String
+  documentId        String?
+  expectedSizeBytes BigInt
+  reservedBytes     BigInt
+  status            String    @default("RESERVED")
+  expiresAt         DateTime
+  createdAt         DateTime  @default(now())
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  document Document? @relation(fields: [documentId], references: [id], onDelete: SetNull)
+
+  @@index([userId, status])
+  @@index([expiresAt])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String
+  action     String
+  targetType String?
+  targetId   String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  actor User @relation(fields: [actorId], references: [id], onDelete: Cascade)
+
+  @@index([actorId, createdAt])
+  @@index([action])
+}
+
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}

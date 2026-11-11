@@ -1,0 +1,21 @@
+@import "tailwindcss";
+
+:root {
+  --navy-950: #0a1628;
+  --navy-900: #10233f;
+  --navy-800: #16305a;
+  --gold-500: #c9a227;
+  --gold-400: #d9b845;
+}
+
+@theme inline {
+  --color-navy-950: var(--navy-950);
+  --color-navy-900: var(--navy-900);
+  --color-navy-800: var(--navy-800);
+  --color-gold-500: var(--gold-500);
+  --color-gold-400: var(--gold-400);
+}
+
+body {
+  font-family: Arial, Helvetica, sans-serif;
+}

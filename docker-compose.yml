@@ -1,0 +1,35 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-literia}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-literia}
+      POSTGRES_DB: ${POSTGRES_DB:-literia}
+    volumes:
+      - literia-db:/var/lib/postgresql/data
+    networks:
+      - literia-net
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - db
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-literia}:${POSTGRES_PASSWORD:-literia}@db:5432/${POSTGRES_DB:-literia}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    volumes:
+      - literia-storage:/app/storage
+    networks:
+      - literia-net
+
+volumes:
+  literia-db:
+  literia-storage:
+
+networks:
+  literia-net:
